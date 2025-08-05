@@ -10,55 +10,63 @@ dotenv.config();
 
 const db = new DB();
 
-// Seed the database with initial values on startup.  In a real
-// deployment this may not be necessary as the cron job will
-// populate the tables regularly.  The seed ensures the API
-// returns meaningful data during development.
-async function seed() {
+/** Pull fresh data from all sources. */
+async function refreshAll() {
   await fetchMarkets(db);
   await fetchEconomic(db);
   await fetchPrivateEquity(db);
 }
-// Immediately seed.  Ignore errors.
-seed().catch((err) => console.error('Seeding error', err));
+
+/* Seed once at startup so the dashboard is never empty */
+refreshAll().catch((err) => console.error('Initial seed error:', err));
 
 const app = express();
 
-// Utility to get last update timestamp for a table.
+/** Helper: newest timestamp across all data tables. */
 function getLastUpdate(): string | null {
   const tables = ['markets', 'economics', 'pe_metrics'];
   let latest: string | null = null;
-  for (const table of tables) {
-    const stmt = (db as any).db.prepare(`SELECT MAX(timestamp) as ts FROM ${table}`);
-    const row = stmt.get();
-    if (row && row.ts) {
-      if (!latest || row.ts > latest) {
-        latest = row.ts;
-      }
-    }
+
+  for (const t of tables) {
+    const row = (db as any).db.prepare(`SELECT MAX(timestamp) AS ts FROM ${t}`).get();
+    if (row && row.ts && (!latest || row.ts > latest)) latest = row.ts;
   }
   return latest;
 }
 
-app.get('/api/markets', (req, res) => {
+/* ---------- Public API ---------- */
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', updated: getLastUpdate() });
+});
+
+app.get('/markets', (req, res) => {
   const category = req.query.category as string | undefined;
-  const data = db.getLatestMarketQuotes(category);
-  res.json({ data, lastUpdate: getLastUpdate() });
+  res.json(db.getLatestMarketQuotes(category));
 });
 
-app.get('/api/economics', (req, res) => {
-  const data = db.getLatestEconomicReleases();
-  res.json({ data, lastUpdate: getLastUpdate() });
+app.get('/economics', (_req, res) => {
+  res.json(db.getLatestEconomicReleases());
 });
 
-app.get('/api/pe', (req, res) => {
-  const data = db.getLatestPEMetrics();
-  res.json({ data, lastUpdate: getLastUpdate() });
+app.get('/pe_metrics', (_req, res) => {
+  res.json(db.getLatestPEMetrics());
 });
 
-app.get('/api/commentary', (req, res) => {
-  const commentary = generateCommentary(db);
-  res.json({ commentary, lastUpdate: getLastUpdate() });
+app.get('/commentary', (_req, res) => {
+  res.json(generateCommentary(db));
+});
+
+/* ---------- Cron / manual refresh ---------- */
+
+app.get('/tasks/refresh', async (_req, res) => {
+  try {
+    await refreshAll();
+    res.json({ status: 'ok', message: 'Data refreshed', updated: getLastUpdate() });
+  } catch (err: any) {
+    console.error('Refresh error:', err);
+    res.status(500).json({ status: 'error', message: err.message });
+  }
 });
 
 export default app;

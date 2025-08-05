@@ -19,7 +19,6 @@ export async function fetchPortfolio(db: DB): Promise<void> {
 
   try {
     if (key && secret && viewId) {
-      // Attempt to fetch portfolio data via the Addepar API.
       const res = await fetch(
         `https://api.addepar.com/v1/portfolio/views/${viewId}/results?format=json`,
         {
@@ -35,14 +34,13 @@ export async function fetchPortfolio(db: DB): Promise<void> {
         throw new Error(`Addepar API request failed with status ${res.status}`);
       }
 
-      // Cast the JSON response to `any` to satisfy TypeScript’s type checker.
+      // Cast JSON to any to avoid TS18046 errors.
       const json: any = await res.json();
 
       if (Array.isArray(json?.rows)) {
-        json.rows.forEach((row: any) => {
-          const id = uuidv4();
+      json.rows.forEach((row: any) => {
           const record = {
-            id,
+            id: uuidv4(),
             name: row.name,
             market_value: Number(row.market_value) || 0,
             ytd_dollar: Number(row.ytd_dollar) || 0,
@@ -52,6 +50,8 @@ export async function fetchPortfolio(db: DB): Promise<void> {
             nav_percent: row.nav_percent ? Number(row.nav_percent) : undefined,
             nav_target: row.nav_target ? Number(row.nav_target) : undefined,
             bucket: mapBucket(row),
+            // asset_class is required by the DB schema; use the bucket as a proxy.
+            asset_class: mapBucket(row),
             timestamp: new Date().toISOString()
           };
           db.insertPosition(record);
@@ -60,19 +60,17 @@ export async function fetchPortfolio(db: DB): Promise<void> {
       }
     }
   } catch (err) {
-    // Fall through to file-based fallback.
     console.warn(`Addepar API fetch failed: ${err instanceof Error ? err.message : err}`);
   }
 
-  // Fallback: read positions from an Excel or CSV file in backend/data.
+  // Fallback: read positions from a local Excel or CSV file.
   const workbook = XLSX.readFile('data/portfolio.xlsx');
   const sheet = workbook.Sheets['Portfolio View'];
   const rows: any[] = XLSX.utils.sheet_to_json(sheet, { raw: true });
 
   rows.forEach((row) => {
-    const id = uuidv4();
     const record = {
-      id,
+      id: uuidv4(),
       name: row.Name,
       market_value: Number(row.MarketValue) || 0,
       ytd_dollar: Number(row.YtdDollar) || 0,
@@ -82,6 +80,7 @@ export async function fetchPortfolio(db: DB): Promise<void> {
       nav_percent: row.NavPercent ? Number(row.NavPercent) : undefined,
       nav_target: row.NavTarget ? Number(row.NavTarget) : undefined,
       bucket: mapBucket(row),
+      asset_class: mapBucket(row),
       timestamp: new Date().toISOString()
     };
     db.insertPosition(record);
@@ -89,9 +88,8 @@ export async function fetchPortfolio(db: DB): Promise<void> {
 }
 
 /**
- * Simple helper to map Addepar instrument names or types into
- * high-level liquidity buckets.  Adjust this logic to suit your
- * portfolio’s naming conventions.
+ * Map instrument names/types into liquidity buckets. Adjust this
+ * logic to suit your data.
  */
 function mapBucket(row: any): string {
   const type = (row.type || row.Category || '').toLowerCase();

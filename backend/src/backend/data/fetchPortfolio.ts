@@ -1,128 +1,109 @@
+// backend/src/backend/data/fetchPortfolio.ts
+
+import DB from '../database';
 import fetch from 'node-fetch';
 import * as XLSX from 'xlsx';
-import DB from '../database';
+import { v4 as uuidv4 } from 'uuid';
 
-/*
- * Fetch portfolio positions from the Addepar API (Portfolio/Query) and
- * store them in the positions table.  If the API call fails, the
- * function attempts to parse a local XLSX file as a fallback.  The
- * XLSX file must have a sheet named "Portfolio View" with columns
- * matching id, name, assetClass, marketValue, YTD $ and YTD %.
+/**
+ * Fetch positions from the Addepar API using basic authentication.
+ * If the API is unavailable or credentials are missing, fall back to
+ * reading a local Excel file in the /data directory.  The function
+ * classifies each holding into a bucket (liquid/illiquid) and inserts
+ * the result into the positions table.
  */
 export async function fetchPortfolio(db: DB): Promise<void> {
-  const now = new Date().toISOString();
   const key = process.env.ADDEPAR_KEY;
   const secret = process.env.ADDEPAR_SECRET;
   const viewId = process.env.ADDEPAR_VIEW_ID;
-  const baseUrl = process.env.ADDEPAR_BASE_URL || 'https://api.addepar.com';
-  let positions: any[] = [];
-  if (key && secret) {
-    const authHeader =
-      'Basic ' + Buffer.from(`${key}:${secret}`).toString('base64');
-    const endpoint = viewId
-      ? `${baseUrl}/v1/portfolio/views/${viewId}/results?format=json`
-      : `${baseUrl}/v1/portfolio/query`;
-    const opts: any = {
-      method: viewId ? 'GET' : 'POST',
-      headers: {
-        Authorization: authHeader,
-        'Content-Type': 'application/json'
+
+  try {
+    if (key && secret && viewId) {
+      // Attempt to fetch portfolio data via the Addepar API.
+      const res = await fetch(
+        `https://api.addepar.com/v1/portfolio/views/${viewId}/results?format=json`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${key}:${secret}`).toString('base64')}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (!res.ok) {
+        throw new Error(`Addepar API request failed with status ${res.status}`);
       }
+
+      // Cast the JSON response to `any` to satisfy TypeScript’s type checker.
+      const json: any = await res.json();
+
+      if (Array.isArray(json?.rows)) {
+        json.rows.forEach((row: any) => {
+          const id = uuidv4();
+          const record = {
+            id,
+            name: row.name,
+            market_value: Number(row.market_value) || 0,
+            ytd_dollar: Number(row.ytd_dollar) || 0,
+            ytd_percent: Number(row.ytd_percent) || 0,
+            irr: row.irr ? Number(row.irr) : undefined,
+            tvpi: row.tvpi ? Number(row.tvpi) : undefined,
+            nav_percent: row.nav_percent ? Number(row.nav_percent) : undefined,
+            nav_target: row.nav_target ? Number(row.nav_target) : undefined,
+            bucket: mapBucket(row),
+            timestamp: new Date().toISOString()
+          };
+          db.insertPosition(record);
+        });
+        return;
+      }
+    }
+  } catch (err) {
+    // Fall through to file-based fallback.
+    console.warn(`Addepar API fetch failed: ${err instanceof Error ? err.message : err}`);
+  }
+
+  // Fallback: read positions from an Excel or CSV file in backend/data.
+  const workbook = XLSX.readFile('data/portfolio.xlsx');
+  const sheet = workbook.Sheets['Portfolio View'];
+  const rows: any[] = XLSX.utils.sheet_to_json(sheet, { raw: true });
+
+  rows.forEach((row) => {
+    const id = uuidv4();
+    const record = {
+      id,
+      name: row.Name,
+      market_value: Number(row.MarketValue) || 0,
+      ytd_dollar: Number(row.YtdDollar) || 0,
+      ytd_percent: Number(row.YtdPercent) || 0,
+      irr: row.IRR ? Number(row.IRR) : undefined,
+      tvpi: row.TVPI ? Number(row.TVPI) : undefined,
+      nav_percent: row.NavPercent ? Number(row.NavPercent) : undefined,
+      nav_target: row.NavTarget ? Number(row.NavTarget) : undefined,
+      bucket: mapBucket(row),
+      timestamp: new Date().toISOString()
     };
-    if (!viewId) {
-      opts.body = JSON.stringify({
-        query: {
-          type: 'positions',
-          fields: [
-            'id',
-            'name',
-            'assetClass',
-            'marketValue',
-            'ytdDollar',
-            'ytdPercent'
-          ]
-        }
-      });
-    }
-    try {
-      const res = await fetch(endpoint, opts);
-      if (res.ok) {
-        const json = await res.json();
-        positions = (viewId ? json.results : json.data) || [];
-      } else {
-        console.error('Addepar API error:', res.status);
-      }
-    } catch (err) {
-      console.error('Addepar fetch error', err);
-    }
-  }
-  // Fallback to XLSX if no positions were fetched
-  if (!positions || positions.length === 0) {
-    const filePath = process.env.ADDEPAR_XLSX_PATH;
-    if (filePath) {
-      try {
-        const buf = require('fs').readFileSync(filePath);
-        const workbook = XLSX.read(buf, { type: 'buffer' });
-        const sheet = workbook.Sheets['Portfolio View'];
-        if (sheet) {
-          positions = XLSX.utils.sheet_to_json(sheet);
-        }
-      } catch (err) {
-        console.error('XLSX fallback error', err);
-      }
-    }
-  }
-  // Classify and insert
-  for (const row of positions) {
-    const assetClass: string = row.assetClass || row.asset_class || '';
-    const bucket = mapBucket(assetClass);
-    db.insertPosition({
-      id: String(row.id || row.ID || Math.random().toString(36)),
-      name: row.name || row.Name,
-      asset_class: assetClass,
-      market_value: Number(row.marketValue || row['Market Value'] || 0),
-      ytd_dollar: row.ytdDollar || row['YTD $'],
-      ytd_percent: row.ytdPercent || row['YTD %'],
-      irr: row.irr || row.IRR,
-      tvpi: row.tvpi || row.TVPI,
-      bucket,
-      timestamp: now
-    });
-  }
+    db.insertPosition(record);
+  });
 }
 
 /**
- * Map a raw asset class string into a high‑level bucket (Liquid vs
- * Illiquid and subcategories).  This mirrors the classification used
- * in the FinDashPro scaffold.  Adjust the cases as needed for your
- * portfolio.
+ * Simple helper to map Addepar instrument names or types into
+ * high-level liquidity buckets.  Adjust this logic to suit your
+ * portfolio’s naming conventions.
  */
-function mapBucket(assetClass: string): string {
-  const cls = assetClass.toLowerCase();
-  if (
-    cls.includes('stock') ||
-    cls.includes('equity') ||
-    cls.includes('us') ||
-    cls.includes('eafe') ||
-    cls.includes('emerging')
-  )
-    return 'Liquid';
-  if (
-    cls.includes('investment grade') ||
-    cls.includes('ig') ||
-    cls.includes('hy') ||
-    cls.includes('high yield') ||
-    cls.includes('em debt') ||
-    cls.includes('emerging market debt') ||
-    cls.includes('commodity') ||
-    cls.includes('crypto') ||
-    cls.includes('cash')
-  )
-    return 'Liquid';
-  if (cls.includes('private equity')) return 'Illiquid: Private Equity';
-  if (cls.includes('real asset')) return 'Illiquid: Real Assets';
-  if (cls.includes('private credit')) return 'Illiquid: Private Credit';
-  if (cls.includes('infrastructure')) return 'Illiquid: Infrastructure';
-  if (cls.includes('co-invest')) return 'Illiquid: Co‑investments';
+function mapBucket(row: any): string {
+  const type = (row.type || row.Category || '').toLowerCase();
+  if (/stock|equity|eafe|em|us/.test(type)) return 'Liquid – Equities';
+  if (/bond|fixed|ig|hy|em debt/.test(type)) return 'Liquid – Fixed Income';
+  if (/commodity|gold|oil/.test(type)) return 'Liquid – Commodities';
+  if (/crypto|bitcoin|ethereum/.test(type)) return 'Liquid – Crypto';
+  if (/cash|money market/.test(type)) return 'Liquid – Cash';
+  if (/private.*equity/.test(type)) return 'Illiquid – Private Equity';
+  if (/real assets|real estate/.test(type)) return 'Illiquid – Private Real Assets';
+  if (/credit/.test(type)) return 'Illiquid – Private Credit';
+  if (/infrastructure/.test(type)) return 'Illiquid – Infrastructure';
+  if (/co-invest/.test(type)) return 'Illiquid – Co-Invests';
   return 'Other';
 }

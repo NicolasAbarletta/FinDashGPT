@@ -1,8 +1,8 @@
-import server from './server';
-import './cron';
+import app from './server';
 
-const port = process.env.PORT || 3001;
-server.listen(port, () => {
+const PORT = process.env.PORT || 10000;
+
+app.listen(PORT, () => {
   // eslint-disable-next-line no-console
-  console.log(`FinDash backend listening on port ${port}`);
+  console.log(`FinDash backend listening on port ${PORT}`);
 });

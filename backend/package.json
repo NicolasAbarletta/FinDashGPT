@@ -17,6 +17,7 @@
     "node-cron": "^3.0.1"
   },
   "devDependencies": {
+    "cors": "^2.8.5"
     "typescript": "^5.3.2",
     "ts-node": "^10.9.1",
     "@types/express": "^4.17.17",

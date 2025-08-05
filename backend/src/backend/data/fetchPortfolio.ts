@@ -1,7 +1,6 @@
 // backend/src/backend/data/fetchPortfolio.ts
 
 import DB from '../database';
-import fetch from 'node-fetch';
 import * as XLSX from 'xlsx';
 import { v4 as uuidv4 } from 'uuid';
 

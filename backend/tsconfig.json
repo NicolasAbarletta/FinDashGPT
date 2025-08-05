@@ -9,6 +9,6 @@
     "resolveJsonModule": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*"],
+  "include": ["src/backend/**/*", "src/backend/types.d.ts"],
   "exclude": ["node_modules", "dist"]
 }
